@@ -13,10 +13,12 @@ from .models import HarvestCandidate, HarvestConfig, HarvestResult
 from .parser import TranscriptParser
 from .extractor import PatternExtractor
 from .patterns import load_filters
+from ..compat import _sanitize_log_value
 
 logger = logging.getLogger(__name__)
 
-# Provenance: bump when the harvest pipeline changes materially (RFC-harvest-provenance).
+# Provenance: starts at 3 to align with RFC-harvest-provenance phases (provenance tagging, 
+# re-harvest safety, session digest). Increment when the harvest pipeline changes materially.
 HARVEST_PIPELINE_VERSION = 3
 
 
@@ -254,21 +256,66 @@ class SessionHarvester:
               "total_insights": int,
               "missing_insights": [str],    # insights with no match >= threshold
               "low_quality_matches": [str], # insights whose best match is weak
-              "safe_to_delete": bool,       # coverage complete and no gaps
+              "session_found": bool,        # session file was located and processed
+              "safe_to_delete": bool,       # session processed, coverage complete, no gaps
             }
+
+        Raises:
+            ValueError: if ``threshold`` is not a positive score in (0.0, 1.0].
         """
         from .models import HarvestConfig
 
+        # Guard the public threshold: an absent match is scored 0.0, so a
+        # threshold <= 0 would let every missing insight count as "covered"
+        # and wrongly mark a session safe to delete.
+        if not (0.0 < threshold <= 1.0):
+            raise ValueError(
+                f"threshold must be a score in (0.0, 1.0], got {threshold!r}"
+            )
+
+        # The session_id is caller-controlled and is turned into a filesystem
+        # path. Resolve it and confirm it stays under project_dir, rejecting
+        # traversal (e.g. "../other/transcript") before any I/O — otherwise both
+        # the existence check and _resolve_sessions would read a JSONL outside
+        # the configured session directory (repo directive: validate user paths).
+        base_dir = Path(self.project_dir).resolve()
+        session_path = (base_dir / f"{session_id}.jsonl").resolve()
+        contained = session_path.is_relative_to(base_dir)
+        session_found = contained and session_path.exists()
+
+        if not contained:
+            logger.warning(
+                "Rejected out-of-directory session id %s",
+                _sanitize_log_value(session_id),
+            )
+            return {
+                "session_id": session_id, "coverage": 0.0, "total_insights": 0,
+                "missing_insights": [], "low_quality_matches": [],
+                "session_found": False, "safe_to_delete": False,
+            }
+
         cfg = HarvestConfig(sessions=1, session_ids=[session_id],
                             dry_run=True, use_llm=use_llm)
-        results = self.harvest(cfg)
+        # Offload synchronous harvesting (blocking file + LLM I/O) off the event
+        # loop so this async check does not stall unrelated coroutines.
+        results = await asyncio.to_thread(self.harvest, cfg)
         candidates = [c for r in results for c in r.candidates]
 
+        if not session_found:
+            # The transcript was never inspected — deleting it could lose data.
+            return {
+                "session_id": session_id, "coverage": 0.0, "total_insights": 0,
+                "missing_insights": [], "low_quality_matches": [],
+                "session_found": False, "safe_to_delete": False,
+            }
+
         if not candidates:
-            # Nothing worth harvesting → deleting the transcript loses nothing.
+            # Session was found and processed but yields nothing worth keeping →
+            # deleting the transcript loses nothing.
             return {
                 "session_id": session_id, "coverage": 1.0, "total_insights": 0,
-                "missing_insights": [], "low_quality_matches": [], "safe_to_delete": True,
+                "missing_insights": [], "low_quality_matches": [],
+                "session_found": True, "safe_to_delete": True,
             }
 
         missing, weak, covered = [], [], 0
@@ -293,6 +340,7 @@ class SessionHarvester:
             "total_insights": len(candidates),
             "missing_insights": missing,
             "low_quality_matches": weak,
+            "session_found": True,
             "safe_to_delete": coverage >= 1.0 and not missing and not weak,
         }
 
