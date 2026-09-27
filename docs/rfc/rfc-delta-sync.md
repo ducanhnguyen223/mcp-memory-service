@@ -1,13 +1,14 @@
 # RFC: Delta Event-Log Sync (malha de memória multi-agente)
 
-**Data:** 2026-09-13
+**Data:** 2026-09-13 (rev. 2026-09-27)
 **Autor:** Claudio + Zero (Kiro CLI)
 **Branch de código:** `feat/delta-sync` (a partir de `upstream/main`)
-**Base:** `upstream/main` v11.11.0
-**Versão:** 0.1 (draft)
+**Base:** `upstream/main` v11.14.0+ (agent_id #1100 fases 1+2 JÁ MERGEADAS)
+**Versão:** 0.2 (draft — pronto para abrir como issue, a pedido do Henry no #1304)
 **Inspiração:** Mnemosyne `sync.py` / `sync_server.py` (delta event-log + cripto client-side)
 **Reintegra:** dor de sync via Insync (tasks internas 5d41dda2 stale-reads, corrupção SQLite+WAL)
-**Status:** DRAFT — amadurecer localmente antes de virar issue/RFC para o Henry
+**Relacionado:** #1304 (hybrid remote secondary — o caminho *hybrid-nativo* do mesmo destino; ver §7), #1100 (agent_id, base de R6), #57 upstream (federated retrieval, fora de escopo)
+**Status:** DRAFT v0.2 — a abrir como issue própria no GitHub (Henry pediu "file it as its own issue" no #1304).
 
 ---
 
@@ -93,9 +94,9 @@ Substituir o file-sync por um **sync delta baseado em event-log**, bidirecional,
 
 > EARS: WHERE client-side encryption is enabled, THE sync SHALL encrypt payload before transmission so the server sees only metadata.
 
-**R6**: O compartilhamento é escopado por agente.
+**R6**: O compartilhamento é escopado por agente, usando o `agent_id` que **já existe** no upstream (v11.14.0: metadata.agent_id + header X-Agent-ID via #1278/#1297, tag `agent:<id>` no web layer).
 
-> EARS: WHEN an agent marks memories as shareable, THE sync SHALL propagate only those to peers, keeping the rest private.
+> EARS: WHEN an agent marks memories as shareable, THE sync SHALL propagate only those to peers, keeping the rest private. THE agent identity SHALL be read from `metadata.agent_id` (the merged #1100 Phase 1/2 field), not from a new mechanism.
 
 ### Não-Funcional
 
@@ -137,3 +138,16 @@ Substituir o file-sync por um **sync delta baseado em event-log**, bidirecional,
 - [ ] Compartilhamento escopado por agente (shareable vs privado).
 - [ ] Serviço detecta mudança em disco e não serve dado stale.
 - [ ] Coexiste com hot-backup na transição.
+
+---
+
+## 7. Relação com #1304 (hybrid remote secondary) — não bifurcar a superfície de sync
+
+O Henry (no #1304) pediu que este framing fique **explícito**, para os dois esforços não divergirem:
+
+- **#1304 = o caminho *hybrid-nativo*.** Torna o `secondary` do backend `hybrid` plugável (`cloudflare|http`), para que uma instância self-hosted seja o hub e cada cliente mantenha cache local. É **single-writer por cliente** contra um hub, drift detectado por `list_content_hashes()`. Resolve o hub-and-spoke de forma nativa no storage layer.
+- **Esta RFC = o caminho *multi-writer*.** Event-log append-only com `agent_id`, reconciliação determinística, compartilhamento escopado por agente. Modela **N agentes escrevendo com autoria** (Zero/T'Pol/Scotty), não só N caches de um dono.
+
+**Regra de convivência (acordada com o Henry):** o que **entrar primeiro** define a superfície; o que entrar **em segundo se dobra ao primeiro**. Como o #1304 é menor e já está sendo desenhado, é provável que ele entre antes — então esta RFC deve, quando implementada, **reusar** o que o #1304 estabelecer (o `remote_http` storage, o endpoint de bulk-hash, o model-match startup-check) em vez de criar um canal paralelo. O event-log é a camada de *autoria + reconciliação seletiva* por cima do transporte que o #1304 cria, não um transporte concorrente.
+
+O ângulo de autoria se enuncia contra o `agent_id` **já mergeado** (#1100 fases 1+2), não contra a proposta original.
