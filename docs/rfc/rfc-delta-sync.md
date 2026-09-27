@@ -4,7 +4,7 @@
 **Autor:** Claudio + Zero (Kiro CLI)
 **Branch de código:** `feat/delta-sync` (a partir de `upstream/main`)
 **Base:** `upstream/main` v11.14.0+ (agent_id #1100 fases 1+2 JÁ MERGEADAS)
-**Versão:** 0.2 (draft — pronto para abrir como issue, a pedido do Henry no #1304)
+**Versão:** 0.3 (draft — v0.2 aberta como issue #1345; v0.3 incorpora os 4 invariantes de aceite da revisão do @ducanhnguyen223, §8)
 **Inspiração:** Mnemosyne `sync.py` / `sync_server.py` (delta event-log + cripto client-side)
 **Reintegra:** dor de sync via Insync (tasks internas 5d41dda2 stale-reads, corrupção SQLite+WAL)
 **Relacionado:** #1304 (hybrid remote secondary — o caminho *hybrid-nativo* do mesmo destino; ver §7), #1100 (agent_id, base de R6), #57 upstream (federated retrieval, fora de escopo)
@@ -138,6 +138,11 @@ Substituir o file-sync por um **sync delta baseado em event-log**, bidirecional,
 - [ ] Compartilhamento escopado por agente (shareable vs privado).
 - [ ] Serviço detecta mudança em disco e não serve dado stale.
 - [ ] Coexiste com hot-backup na transição.
+- [ ] **Idempotência (§8.1):** replay/re-tentativa de batch não duplica mutação; deletes são tombstones duráveis.
+- [ ] **Ordenação (§8.2):** resolver HLC + tie-breaker estável, convergência independente da ordem de chegada.
+- [ ] **Embedding (§8.3):** nunca serve (conteúdo novo, vetor velho); `embedding_pending` ou re-embed no replay.
+- [ ] **Escopo (§8.4):** autoria preservada no replay; agente não publica memória privada de outro; política aplicada no apply do peer.
+- [ ] **Cursor (§8.5):** o cursor/ack por-peer é a fonte de verdade da completude de observação (não `data_version`).
 
 ---
 
@@ -151,3 +156,73 @@ O Henry (no #1304) pediu que este framing fique **explícito**, para os dois esf
 **Regra de convivência (acordada com o Henry):** o que **entrar primeiro** define a superfície; o que entrar **em segundo se dobra ao primeiro**. Como o #1304 é menor e já está sendo desenhado, é provável que ele entre antes — então esta RFC deve, quando implementada, **reusar** o que o #1304 estabelecer (o `remote_http` storage, o endpoint de bulk-hash, o model-match startup-check) em vez de criar um canal paralelo. O event-log é a camada de *autoria + reconciliação seletiva* por cima do transporte que o #1304 cria, não um transporte concorrente.
 
 O ângulo de autoria se enuncia contra o `agent_id` **já mergeado** (#1100 fases 1+2), não contra a proposta original.
+
+---
+
+## 8. Invariantes de correção (fixtures de aceite)
+
+Revisão do `@ducanhnguyen223` (2026-09-27): antes de implementar, quatro invariantes
+ficam **explícitos como fixtures de aceite**, não apenas como prosa. Cada um vira
+teste RED antes do código. Adotados na íntegra — refinam R2/R3 e adicionam garantias
+que a v0.2 tratava informalmente ("timeline + importância" precisa de resolver
+reprodutível).
+
+### 8.1 Identidade de evento / idempotência (refina R2)
+
+- Todo evento carrega uma origem estável `(agent_id, event_id)` com **constraint de
+  unicidade**. Re-tentar um batch ou re-aplicar após crash **não pode** duplicar uma
+  mutação de memória (aplicação idempotente por chave de origem).
+- Deletes são **tombstones duráveis**, não remoção física, com regra de
+  retenção/compactação definida (um tombstone só é coletável após todos os peers
+  conhecidos terem passado do seu cursor).
+- **Fixtures:** (a) aplicar o mesmo batch 2× → estado idêntico, zero duplicatas;
+  (b) crash no meio do apply + replay → convergência sem duplicar; (c) delete
+  seguido de replay de um create antigo do mesmo hash → o tombstone vence (não
+  ressuscita).
+
+### 8.2 Ordenação determinística (refina R3)
+
+- Timestamps de wall-clock **não bastam** entre hosts. A ordenação usa um relógio
+  **lógico/HLC** + tie-breaker estável (ex. `(hlc, agent_id, event_id)`).
+- O resolver define explicitamente: update-vs-update de mesmo conteúdo,
+  delete-vs-update, e chegada de evento atrasado (late event). "Timeline +
+  importância" (R3) passa a ser um **resolver reproduzível** documentado, não uma
+  prioridade informal — importância só desempata quando a ordem lógica empata.
+- **Fixtures:** dois hosts com eventos concorrentes sobre o mesmo hash convergem ao
+  **mesmo** estado independente da ordem de chegada; um late event que perde a
+  ordem lógica não sobrescreve o vencedor.
+
+### 8.3 Consistência de embedding (novo — fecha um furo da v0.2)
+
+- Um evento de conteúdo aplicado e seu estado de embedding/índice devem ser
+  observáveis como **um estado versionado único**, ou explicitamente marcados
+  `embedding_pending`. Sem isso, um sync bem-sucedido pode tornar uma memória
+  visível com um vetor **antigo**.
+- O evento carrega um **hash de conteúdo/versão**; o apply só marca a memória como
+  pesquisável quando o embedding corresponde à versão do conteúdo.
+- **Fixtures:** replay de um update de conteúdo detecta embedding stale (vetor da
+  versão anterior) e ou re-embedda ou expõe `embedding_pending` — nunca serve o par
+  (conteúdo novo, vetor velho) como consistente.
+
+### 8.4 Identidade e escopo de compartilhamento (refina R6)
+
+- `agent_id` é derivado do **transporte/sessão autenticada**, e o `metadata.agent_id`
+  é o **valor sincronizado**, não a autoridade. Um cliente não pode publicar em nome
+  de outro agente reescrevendo metadata.
+- **Fixtures:** (a) evento replayado mantém a autoria original; (b) agente A tentando
+  publicar memória privada do agente B é rejeitado; (c) mudança de política de
+  compartilhamento **depois** de um evento já enfileirado — definir se aplica ao
+  backlog ou só a eventos novos (decisão: a política vigente no momento do **apply**
+  no peer, não no enqueue, para não vazar retroativamente).
+
+### 8.5 Cursor de sync como fonte de verdade (corrige R7)
+
+Observação do revisor, adotada: `PRAGMA data_version` detecta staleness da **conexão
+local**, mas **não prova** que o event-log de outro host foi totalmente observado. O
+**cursor/ack de sync permanece a fonte de verdade** do "até onde já vi de cada peer".
+R7 fica restrito ao seu escopo real (staleness de conexão local); a completude de
+observação entre hosts é responsabilidade do cursor por-peer, não do `data_version`.
+
+> EARS (R3'): WHEN divergent events are reconciled, THE resolver SHALL order them by
+> a logical/HLC clock with a stable tie-breaker, using importance only to break a
+> logical-order tie, deterministically and reproducibly.
