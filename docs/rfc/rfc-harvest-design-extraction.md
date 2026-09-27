@@ -1,13 +1,13 @@
 # RFC: Harvest Design-Extraction (colher análise longa + ToolResults ricos)
 
-**Data:** 2026-09-26
+**Data:** 2026-09-26 (rev. 2026-09-27)
 **Autor:** Claudio + Zero (Kiro CLI)
 **Branch de código:** `feat/harvest-design-extraction` (a partir de `upstream/main`)
 **Base:** `upstream/main` v11.14.0
-**Versão:** 0.1 (draft)
-**Inspiração:** diagnóstico #1100 (13/set) + discussion #1287 (beacon loop) + #1103 (LLM summarization, VijaySreekar)
+**Versão:** 0.2 (draft — pronto para abrir como issue própria, a pedido do Henry no #1287)
+**Inspiração:** diagnóstico #1100 (13/set) + discussion #1287 (beacon loop, direcionamento do Henry) + #1103 (LLM summarization, VijaySreekar — ponta oposta)
 **Reintegra:** o GAP DE PRODUTO deixado aberto pela RFC-harvest-provenance (que resolveu proveniência+tracker, NÃO cobertura de conteúdo rico)
-**Status:** DRAFT — amadurecer localmente antes de virar issue/RFC para o Henry
+**Status:** DRAFT v0.2 — a abrir como issue própria (Henry: "write the RFC as you planned... keep it on its own thread rather than folding it into #1286").
 
 ---
 
@@ -42,6 +42,12 @@ O piloto R10 (memória `9f490378`, 13/set) mediu que das ~6.929 memórias **já 
 
 O argumento "o miner só acha sobras" (jimy-r, #1287) vale para agentes que checkpoint-am bem no momento. O caso #1100 **refuta isso para o nosso uso**: o design substantivo NÃO foi escrito no momento — viveu nas análises longas e ToolResults, e foi descartado por limitação estrutural. Não era sobra; era o prato principal.
 
+### COVERAGE ≠ YIELD (a distinção do Henry, #1287 — o eixo desta RFC)
+
+Henry cravou a distinção que reordena a discussão: nosso "23 blocos → 1 memória" **não é um número de yield, é um número de cobertura**, e os dois estavam sendo lidos como a mesma coisa. Yield-quase-zero pode significar **(a)** "a auditoria não achou nada que valesse guardar" OU **(b)** "o extractor não tinha representação para o que estava lá". O <5% de trigger-rate (nosso) e o 0/18 do jimy-r são do tipo **(a)** — yield real baixo. O caso #1100 é do tipo **(b)** — gap de capacidade. **Não pertencem à mesma coluna.** Uma capacidade que descarta conteúdo por não saber representá-lo reporta um gap como auditoria vazia — e é desligada pelo motivo errado.
+
+Consequência de design (Henry): **a cobertura tem que ser mensurável ANTES de mudar o extractor.** Hoje "23 blocos eram descartáveis" e "23 blocos foram descartados" são indistinguíveis de fora. Daí a §Phase 0 abaixo ser pré-requisito, não parte do extractor.
+
 ### Risco de não fazer
 
 Toda sessão de design denso (como a própria sessão de 26/set: análise do auto-supersede, investigação do `_store_associations_in_graph_table`, raciocínio da Opção 1 no #1318) perde o *porquê* das decisões. O banco acumula conclusões sem fundamentação → o agente futuro repete a investigação do zero.
@@ -60,6 +66,16 @@ Adicionar um **modo de extração de design** ao harvest que capture análise lo
 
 > Convenção EARS (DEVELOPMENT-STANDARDS §8.4.1): uma ação por frase, sujeito = componente, testável.
 
+### Phase 0 — instrumento de cobertura (PRÉ-REQUISITO, gate do Henry)
+
+O extractor só é construído **depois** deste instrumento provar que há cobertura a recuperar. É uma mudança menor que o extractor e é o que torna qualquer resultado posterior (positivo ou negativo) confiável.
+
+- **R0.1** — WHEN o parser processa um transcript, THE parser SHALL contar o que **viu e descartou por tipo de bloco** (Prompt/Response/AssistantMessage/ToolResult/outros), emitindo um relatório de cobertura sem alterar o que é colhido.
+- **R0.2** — THE relatório de cobertura SHALL distinguir "bloco visto e extraído" de "bloco visto e descartado", por tipo, de modo que "N blocos eram descartáveis" e "N blocos foram descartados" deixem de ser indistinguíveis de fora.
+- **R0.3** — THE design-extractor (R2/R3) SHALL ser gated no que o instrumento de cobertura reportar: não se implementa o extractor antes de o instrumento mostrar volume de descarte relevante por tipo.
+
+> Racional (Henry): "an instrument that counts what the parser saw and discarded, per block type, is a smaller change than the LLM extractor and it is the thing that tells us whether the extractor was worth building." O jimy-r reforçou com dado próprio: um per-type count teria mostrado a estreiteza do detector (126 candidatos de um só detector) semanas antes da taxa de drain revelar.
+
 ### Funcional — captura de conteúdo rico
 
 - **R1** — THE parser SHALL incluir `ToolResult` no mapeamento de tipos, preservando o conteúdo (com truncagem configurável para saídas volumosas).
@@ -71,7 +87,12 @@ Adicionar um **modo de extração de design** ao harvest que capture análise lo
 
 - **R5** — THE design-extraction SHALL ser opt-in por configuração (`MCP_HARVEST_DESIGN_ENABLED`), default off até validação de yield.
 - **R6** — THE design-extraction SHALL registrar uma taxa de adoção desde o dia um (candidatos gerados vs. memórias que sobreviveram ao dedup), para distinguir "yield real" de "gate morto" (lição #1287: yield tem que ser contado).
+- **R6.1** — THE dashboard/telemetria SHALL distinguir TRÊS estados, não dois (Henry): (1) "rodou e não achou nada"; (2) "bateu o kill-threshold e se desligou"; (3) **"rodou, o conteúdo estava presente, e nada no pipeline conseguiu representá-lo"** — este terceiro é um gap de capacidade (um bug que o loop não consegue reportar sobre si mesmo), não uma auditoria vazia, e sem distingui-lo o loop é desligado pelo motivo errado.
 - **R7** — WHERE um candidato de design é ≥ `similarity_threshold` de uma memória existente, THE ingest SHALL evoluí-la (versioned) em vez de duplicar.
+
+### Alternativas mais baratas que o LLM (Henry: "one of them may be enough")
+
+- **R2.1** — ANTES de comprometer um passo LLM, THE RFC SHALL avaliar duas alternativas mais baratas que o instrumento de cobertura (Phase 0) permite medir: **(a)** um trigger-set melhor/mais amplo que capture início de análise longa; **(b)** simplesmente parsear ToolResults (R1) e mantê-los com truncagem. Uma das duas pode fechar a maior parte do gap sem custo/latência de LLM — o LLM-extractor (R3) só se justifica se o Phase 0 mostrar que o gap sobrevive a (a)+(b).
 
 ### Não-funcional
 
@@ -100,6 +121,14 @@ Espelhando a disciplina do R10 (pilotar + medir antes de rodar em massa):
 
 ---
 
-## 6. Estado
+## 6. Migração e compatibilidade (usual four — Henry)
 
-DRAFT — amadurecer localmente. Antes de virar issue para o Henry: rodar o experimento §4 e trazer números (o padrão que funcionou nos PRs anteriores — negative/positive result com medição).
+Qualquer coisa que mude **o que o harvest escreve** precisa de migração/compat declarada:
+- **Phase 0 (R0.x)** não muda o que é escrito — só instrumenta. Zero migração, seguro por padrão.
+- **R1 (ToolResult no parser)** muda o que ENTRA como candidato — aditivo; sessões antigas não são re-harvestadas retroativamente (o R10 já decidiu: não recolher em massa). Só afeta harvest novo daqui pra frente.
+- **R4 (marca `harvest:mode:design`)** é tag/metadata aditiva (padrão RFC-harvest-provenance), backward-compatible.
+- **Default OFF (R5)** garante que nada muda para setups existentes até opt-in explícito.
+
+## 7. Estado
+
+DRAFT v0.2 — pronto para abrir como issue própria (não dobrar no #1286; Henry pediu thread própria). Após abrir: rodar o Phase 0 (instrumento de cobertura) e trazer os números de cobertura por tipo de bloco ANTES de propor o extractor — o padrão "bring numbers first" que funcionou nos PRs anteriores. O escopo do primeiro PR é o próprio Phase 0 (instrumento), não o extractor.
