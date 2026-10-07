@@ -266,7 +266,7 @@ Esses passos são requisitos de desenho; volume, duração e limites práticos d
 - **Cloudflare e Milvus: fora da fase inicial.** Não presumir atomicidade entre seus writes e uma tabela SQLite local; cada backend exige contrato de outbox/transaction, retries e tombstone próprio mais os fixtures de §8. Não alegar suporte por compartilhar a interface `MemoryStorage`.
 - Expandir o escopo só com um backend nomeado, um caminho de mutação end-to-end e testes de falha/rollback para o backend correspondente. Backends não listados permanecem sem suporte explícito.
 
-### 9.5 Primeiro PR proposto (depois da estabilização de #1304)
+### 9.5 Primeiro PR proposto (depois das Fases 3 e 4 de #1304)
 
 Um PR pequeno, sem transporte:
 
@@ -275,4 +275,4 @@ Um PR pequeno, sem transporte:
 3. implementar os casos de teste de §8.1 para unicidade, repetição/replay e tombstone, incluindo rollback/crash na fronteira da transação;
 4. não incluir endpoint de rede, sync bidirecional, resolução HLC, criptografia, backend hybrid/Cloudflare/Milvus ou remoção do hot-backup.
 
-**Gate:** só abrir esse PR depois que #1304 tiver sido integrado e os contratos de storage/secondary estiverem estáveis; confirmar primeiro que o event-log local ainda agrega valor acima de #1304. Cada etapa posterior terá PR e casos de teste próprios. Este RFC não autoriza iniciar implementação antes desse gate.
+**Gate:** abrir este PR somente depois que as Fases 3 e 4 de #1304 forem mescladas. Depois disso, confirmar que os contratos de storage/secondary estão estáveis e que o event-log local ainda agrega valor acima de #1304. Cada etapa posterior terá PR e casos de teste próprios. Este RFC não autoriza iniciar implementação antes desse gate.
